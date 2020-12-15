@@ -9,52 +9,16 @@ import json
 import time
 from datetime import datetime
 import sqlite3
-import plotly
+import plotly.graph_objs as go
+from collections import Counter
 
 
-BASE_URL = 'http://www.nuforc.org/webreports/' 
+BASE_URL = 'http://www.nuforc.org/webreports/'
+TYPE_DATA_URL = 'http://www.nuforc.org/webreports/ndxshape.html' 
 CACHE_FILENAME = "nuforc_cache.json"
 CACHE_DICT = {}
-DATABASE = 'NUFORC_Reports.sqlite'
-
-class Report:
-    '''a reported instance of a UFO sighting
-
-    Instance Attributes
-    -------------------
-    date: date object
-        the date of the sighting in MM/DD/YY format, converted from a string to a date object
-    
-    city: string
-        the name of the city where the reported event happened
-
-    state: string
-        the 2-letter acronym for the state where the reported event happened
-
-    shape: string
-        the UFO shape
-
-    '''
-    def __init__ (self, date="no date", time="no time", city="no city", state="no state", shape="none"):
-        self.date = date
-        self.time = time
-        self.city = city
-        self.state = state
-        self.shape = shape
-    
-    def info(self):
-        '''Prints the report information as a single string
-
-    Parameters
-    ----------
-    none
-
-    Returns
-    -------
-    str
-        Formatted print statement
-    '''
-        return (f"{self.date} in {self.city}, {self.state}")
+STATE_DICT = {"Alabama":"AL", "Alaska":"AK", "Arizona":"AZ", "Arkansas":"AR", "California":"CA", "Colorado":"CO","Connecticut":"CT", "Delaware":"DE", "District of Columbia":"DC", "Florida":"FL", "Georgia":"GA", "Hawaii":"HI", "Idaho":"ID", "Illinois":"IL", "Indiana":"IN", "Iowa":"IA", "Kansas":"KS", "Kentucky":"KY", "Louisiana":"LA", "Maine":"ME", "Maryland":"MD", "Massachusetts":"MA", "Minnesota":"MN", "Michigan":"MI", "Mississippi":"MS", "Missouri":"MO", "Montana":"MT", "Nebraska":"NE", "Nevada":"NV", "New Hampshire":"NH", "New Jersey":"NJ", "New Mexico":"NM", "New York":"NY", "North Carolina":"NC", "North Dakota":"ND", "Ohio":"OH", "Oklahoma":"OK", "Oregon":"OR", "Pennsylvania":"PA", "Rhode Island":"RI", "South Carolina":"SC", "South Dakota":"SD", "Tennessee":"TN", "Texas":"TX", "Utah":"UT", "Vermont":"VT", "Virginia":"VA", "Washington":"WA", "West Virginia":"WV", "Wisconsin":"WI", "Wyoming":"WY"}
+DATABASE = 'NUFORC_Data.sqlite'
 
 def create_db():
     conn = sqlite3.connect(DATABASE)
@@ -67,25 +31,24 @@ def create_db():
     create_reports_sql = '''
         CREATE TABLE IF NOT EXISTS "Reports" (
             "Id" INTEGER PRIMARY KEY AUTOINCREMENT,
-            "Date" DATE NOT NULL,
-            "Time" TIME (0) NOT NULL,
+            "Date" DATE,
+            "Time" TIME (0),
             "City" TEXT NOT NULL,
-            "State" TEXT NOT NULL
+            "State" TEXT NOT NULL,
+            "UFOTypeId" INTEGER
         )
     '''
-            #"ShapeID" INTEGER NOT NULL
-
 
     create_ufos_sql = '''
         CREATE TABLE IF NOT EXISTS "UFO_Types" (
             "Id" INTEGER PRIMARY KEY AUTOINCREMENT,
-            "Shape" TEXT NOT NULL
+            "Shape" TEXT
         )
     '''
     cur.execute(drop_reports_sql)
     cur.execute(drop_ufos_sql)
-    cur.execute(create_reports_sql)
     cur.execute(create_ufos_sql)
+    cur.execute(create_reports_sql)
     conn.commit()
     conn.close()
 
@@ -161,44 +124,58 @@ def url_request_with_cache(url, cache):
         save_cache(cache)
         return cache[url]
 
-
-def create_state_url_dict():
-    ''' Make a dictionary that maps state name to state page url from the NUFORC Report Index by State/Province
-
+def get_ufo_type_data(site_url):
+    '''Populates a SQL table with HTML data from the NUFORC Report Index by Shape of Craft.
+    
     Parameters
     ----------
-    None
-
+    site_url: string
+        The URL for the page listing UFO shapes
+    
     Returns
     -------
-    dict
-        key is the name of a state, value is a url
+    none
     '''
+
+    url_text = url_request_with_cache(site_url, CACHE_DICT)     
+    soup = BeautifulSoup(url_text, 'html.parser') 
+
+    table = soup.find('table')
+    table_data = table.find('tbody', recursive=False)
+    table_rows = table_data.find_all('tr', recursive=False)
     
+    ufos_list = []
 
-    report_index_url = 'http://www.nuforc.org/webreports/ndxloc.html'
-    response = requests.get(report_index_url)
-    soup = BeautifulSoup(response.text, 'html.parser')
+    for row in table_rows:
+        ufo_type_dict = {}
+        shape_cell = row.find_all('td')[0]
+        shape = shape_cell.text.strip()
+        ufo_type_dict['shape'] = shape
+        ufos_list.append(ufo_type_dict)
 
-    state_list_div = soup.find('table')
-    state_table = state_list_div.find('tbody', recursive=False)
-    state_items = state_table.find_all('tr', recursive=False)
+    init_ufos_json = json.dumps(ufos_list)
+    ufos_json = json.loads(init_ufos_json)
 
-    state_url_dict= {}
+    insert_ufos_sql = '''
+        INSERT INTO UFO_Types
+        VALUES (NULL, ?) 
+    '''
 
-    for state in state_items:
-        state_name = state.find('td')
-        state_name_text = state_name.text.strip().lower()
-        page_link_tag =state.find('a')
-        state_page_path = page_link_tag['href']
-        state_page_url = BASE_URL + state_page_path
-        state_url_dict[state_name_text] = state_page_url
-        
-    return state_url_dict
+    conn = sqlite3.connect(DATABASE)
+    cur = conn.cursor()
+    for u in ufos_json:
+        cur.execute(insert_ufos_sql,
+        [
+            u['shape']
+        ]
+        )
+
+    conn.commit()
+    conn.close()
 
 
 def get_report_data_by_state(site_url):
-    '''Makes a list of report instances from a state page index.
+    '''Populates a SQL table with HTML data from the NUFORC Report Index by State/Province.
     
     Parameters
     ----------
@@ -207,8 +184,7 @@ def get_report_data_by_state(site_url):
     
     Returns
     -------
-    instance
-        a report instance
+    none
     '''
 
     url_text = url_request_with_cache(site_url, CACHE_DICT)     
@@ -225,11 +201,53 @@ def get_report_data_by_state(site_url):
         date_time_cell = row.find_all('td')[0]
         date_time = date_time_cell.text.strip()
         try:
+            date_time.strip('[]')
+            try:
+                date_time.strip()
+            except:
+                continue
+        except:
+            continue
+        try:
             date_time = date_time.split()
             date = str(date_time[0])
             time = str(date_time[1])
+            try:
+                date.strip('[]')
+            except:
+                continue
+            try:
+                date.replace("'", "")
+            except:
+                continue
+            try:
+                date.strip()
+            except:
+                continue
         except IndexError:
-            date = str(date_time)
+            try:
+                date = str(date_time).strip('[]')
+            except:
+                date = str(date_time).strip()
+            try:
+                date.replace("'", "")
+            except:
+                date = str(date_time).strip()
+        try:
+            if str(date)[0].isdigit():
+                date = date
+            else:
+                date = None
+        except:
+            continue
+        try:
+            if str(time)[0].isdigit():
+                time = time
+            else:
+                time = None
+        except:
+            continue
+
         city_cell = row.find_all('td')[1]
         city = city_cell.text.strip()
         state_cell = row.find_all('td')[2]
@@ -247,65 +265,192 @@ def get_report_data_by_state(site_url):
     init_reports_json = json.dumps(reports_list)
     reports_json = json.loads(init_reports_json)
 
+    select_ufotypeid_sql = '''
+        SELECT Id FROM UFO_Types
+        WHERE Shape = ?
+    '''
+
     insert_reports_sql = '''
         INSERT INTO Reports
-        VALUES (NULL, ?, ?, ?, ?) 
+        VALUES (NULL, ?, ?, ?, ?, ?) 
     '''
-        ##ADD BACK QUESTION MARK FOR SHAPE WHEN REINSERTED
 
     conn = sqlite3.connect(DATABASE)
     cur = conn.cursor()
+    
     for r in reports_json:
+        try:
+            cur.execute(select_ufotypeid_sql, [r['shape']])
+            shape_id = cur.fetchone()[0]
+        except TypeError:
+            shape_id=None
+
         cur.execute(insert_reports_sql,
         [
             r['date'],
             r['time'],
             r['city'],
-            r['state']
-            #r['shape']
-        ]
-        )
+            r['state'],
+            shape_id
+        ])
 
     conn.commit()
     conn.close()
 
 
+def add_records_to_db():
+    baseurl = (BASE_URL + 'ndxl')
+
+    state_list = []
+    for i in STATE_DICT.values():
+        state_list.append(i)
+    
+    for s in state_list:
+        page_url = (baseurl + s + ".html")
+        get_report_data_by_state(page_url)
+        time.sleep(10)
+
+
 if __name__ == "__main__":
-    STATE_DICT = create_state_url_dict()
-    CACHE_DICT = open_cache()
+    # CACHE_DICT = open_cache()
+    # create_db()
+    # get_ufo_type_data(TYPE_DATA_URL)
+    # add_records_to_db()
 
-    create_db()
+    print('\nWelcome!') 
+    print('\nThis program pulls data from the National UFO Report Center to display information about UFO sightings across the United States.\n')
 
-    get_report_data_by_state('http://www.nuforc.org/webreports/ndxlDE.html')
+    searchable_dict = {k.lower(): v for k, v in STATE_DICT.items()}
 
+    while True:
+        user_input = input("\nEnter the name of a state to see data for UFO reports in that area, or 'quit' to exit the program: ").lower()
 
-    # state_search = input("Enter the name of a state or 'quit': ").lower()
+        if user_input == 'quit':
+            exit()
 
-    # while True:
-    #     if input == 'quit':
-    #         exit()
+        if user_input in searchable_dict:
+            state_abbr = searchable_dict[user_input]
+            connection = sqlite3.connect(DATABASE)
+            cur = connection.cursor()
+            result = cur.execute("SELECT Date, City FROM Reports WHERE State=? AND Date IS NOT NULL ORDER BY Id DESC", (state_abbr,)).fetchall()
+            connection.close()
 
-    #     if state_search in STATE_DICT:
-    #         state_url = STATE_DICT[state_search]
-    #         sites = get_reports_for_state(state_url)
-    #         print(sites)
-    #         break
+            all_date_data = []
+            all_town_data = []
 
-    #     else:
-    #         user_input = input("Invalid entry. Please enter the name of a U.S. state (e.g. Connecticut or connecticut): ")
+            for r in result:
+                date = r[0]
+                all_date_data.append(date)
+                town = r[1]
+                all_town_data.append(town)
 
+            date_report_count_dict = Counter(all_date_data)
+            dates_count = []
+            for i in date_report_count_dict.values():
+                dates_count.append(i)
 
-###datetime conversion:
-# try:
-#             date = datetime.strptime(date_str, '%m/%d/%y %H:%M')
-#         except ValueError:
-#             try:
-#                 date = datetime.strptime(date_str, '%m/%d/%y')
-#             except ValueError:
-#                 try:
-#                     date = datetime.strptime(date_str, '%m/%d/%Y %H:%M')
-#                 except ValueError:
-#                     try:
-#                         date = datetime.strptime(date_str, '%m/%d/%Y')
-#                     except ValueError:
-#                         print("ERROR")
+            town_report_count_dict = Counter(all_town_data)
+            towns_count = []
+            for i in town_report_count_dict.values():
+                towns_count.append(i)
+
+            dates = list(dict.fromkeys(all_date_data))
+            towns = list(dict.fromkeys(all_town_data))
+
+            display_input = input("\nWould you like to see this data sorted by date or by city? Enter 'date' or 'city': ")
+
+            if user_input == 'quit':
+                exit()
+        
+            if display_input == "date":
+                year_input = input("\nEnter a four-digit year (after 1940): ")[-2:]
+                year_data = []
+                for d in dates:
+                    if d[-2:]==year_input:
+                        year_data.append(d)
+
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    mode='markers',
+                    x=year_data, 
+                    y=dates_count,
+                    marker={'symbol':'circle', 'size':12, 'color':'blue'}
+                    )
+                )
+                    
+                fig.update_layout(
+                    title=("UFO Reports by Date in " + user_input.title()),
+                    xaxis_title="Date",
+                    yaxis_title="Number of Reports",
+                    xaxis_range=[(year_input + '-01-01'),(year_input + '-12-31')],
+                    font=dict(
+                        family="Courier New, monospace",
+                        size=14,
+                        color="Black")
+                    )
+                
+                ## The following code is from a Plotly example: https://plotly.com/python/time-series/
+                fig.update_xaxes(
+                    rangeslider_visible=True,
+                    tickformatstops = [
+                        dict(dtickrange=[86400000, 604800000], value="%e. %b d"),
+                        dict(dtickrange=[604800000, "M1"], value="%e. %b w"),
+                        dict(dtickrange=["M1", "M12"], value="%b '%y M"),
+                        dict(dtickrange=["M12", None], value="%Y Y")]
+                )
+                ##
+                
+                fig.show()
+
+            if display_input == "city":
+                town_data = []
+                for t in towns:
+                    shortened_name = (t[:15] + '...') if len(t) > 15 else t
+                    town_data.append(str(shortened_name).title())
+                
+                town_data.sort()
+
+                fig = go.Figure()
+
+                fig.add_trace(go.Scatter(
+                    mode="markers",
+                    x=town_data, 
+                    y=dates_count,
+                    marker={'symbol':'circle', 'size':12, 'color':'green'}
+                    )
+                )
+                    
+                fig.update_layout(
+                    title=("UFO Reports by Date in " + user_input.title()),
+                    xaxis_title="City",
+                    yaxis_title="Number of Reports",
+                    font=dict(
+                        family="Courier New, monospace",
+                        size=14,
+                        color="Black"),
+                    margin=dict(
+                        l=50,
+                        r=50,
+                        b=100
+                    )
+                    )
+
+                # The following code is from a Plotly example: https://plotly.com/python/time-series/
+                fig.update_xaxes(
+                    rangeslider_visible=True,
+                    tickformatstops = [
+                        dict(dtickrange=[86400000, 604800000], value="%e. %b d"),
+                        dict(dtickrange=[604800000, "M1"], value="%e. %b w"),
+                        dict(dtickrange=["M1", "M12"], value="%b '%y M"),
+                        dict(dtickrange=["M12", None], value="%Y Y")]
+                )
+                #
+                
+                fig.show()
+
+        else:
+            user_input = input("\nInvalid entry. Please enter the name of a U.S. state (e.g. Connecticut or connecticut), or 'quit': ")
+            if user_input == 'quit':
+                exit() 
+        
+        continue
