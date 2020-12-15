@@ -1,8 +1,6 @@
 # 507finalproject
 
-Required packages:
-	1. Requests
-  2. Plotly
+Required packages: requests, Plotly
 
 This program uses data scraped from the National UFO Reporting Center (http://www.nuforc.org).
 
